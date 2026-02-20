@@ -32,15 +32,6 @@ jobs:
       - name: Fetch upstream
         run: git fetch upstream --no-tags
 
-      - name: Import upstream tags without overwriting local
-        run: |
-          git fetch upstream "refs/tags/*:refs/upstream/tags/*"
-          for tag in $(git for-each-ref --format='%(refname:strip=3)' refs/upstream/tags); do
-            if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-              git tag "${tag}" "refs/upstream/tags/${tag}"
-            fi
-          done
-
       - name: Sync default branch
         env:
           BRANCH_NAME: ${{ env.TARGET_BRANCH }}
@@ -50,7 +41,3 @@ jobs:
           git checkout "$branch"
           git merge --ff-only "upstream/${branch}"
           git push origin "$branch"
-
-      - name: Push tags
-        if: success()
-        run: git push origin --tags
