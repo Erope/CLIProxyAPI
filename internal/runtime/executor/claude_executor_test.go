@@ -2,9 +2,18 @@ package executor
 
 import (
 	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestApplyClaudeToolPrefix(t *testing.T) {
@@ -196,6 +205,52 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "proxy_mcp__nia__manage_resource" {
 		t.Fatalf("nested tool_reference tool_name = %q, want %q", got, "proxy_mcp__nia__manage_resource")
+	}
+}
+
+func TestClaudeExecutor_ReusesUserIDAcrossModels(t *testing.T) {
+	resetUserIDCache()
+
+	var userIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		userIDs = append(userIDs, gjson.GetBytes(body, "metadata.user_id").String())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	models := []string{"claude-3-5-sonnet", "claude-3-5-haiku"}
+	for _, model := range models {
+		modelPayload, _ := sjson.SetBytes(payload, "model", model)
+		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   model,
+			Payload: modelPayload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("claude"),
+		}); err != nil {
+			t.Fatalf("Execute(%s) error: %v", model, err)
+		}
+	}
+
+	if len(userIDs) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(userIDs))
+	}
+	if userIDs[0] == "" || userIDs[1] == "" {
+		t.Fatal("expected user_id to be populated")
+	}
+	if userIDs[0] != userIDs[1] {
+		t.Fatalf("expected user_id to be reused across models, got %q and %q", userIDs[0], userIDs[1])
+	}
+	if !isValidUserID(userIDs[0]) {
+		t.Fatalf("user_id %q is not valid", userIDs[0])
 	}
 }
 
