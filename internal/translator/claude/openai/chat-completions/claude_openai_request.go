@@ -261,6 +261,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					if hasContent {
 						contentValue = claudeContent
 					}
+				default:
+					// Preserve raw JSON for non-string, non-array tool content
+					contentValue = toolContent.Raw
 				}
 
 				msg := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`

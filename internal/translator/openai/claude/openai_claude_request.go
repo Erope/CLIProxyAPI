@@ -414,7 +414,11 @@ func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
 					appendPart(partStr)
 				} else if txt := item.Get("text"); txt.Exists() && txt.Type == gjson.String {
 					appendText(txt.String())
+				} else {
+					appendPart(item.Raw)
 				}
+			default:
+				appendPart(item.Raw)
 			}
 			return true
 		})
@@ -423,53 +427,49 @@ func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
 			appendPart(partStr)
 		} else if txt := content.Get("text"); txt.Exists() && txt.Type == gjson.String {
 			appendText(txt.String())
+		} else {
+			return content.Raw, false
 		}
+	default:
+		return content.Raw, false
 	}
 
 	if hasParts {
 		arr := gjson.Parse(partsJSON).Array()
-		if len(arr) == 1 && !hasImage {
-			if arr[0].Get("type").String() == "text" {
-				return arr[0].Get("text").String(), false
+		if !hasImage {
+			allText := true
+			textParts := make([]string, 0, len(arr))
+			for _, v := range arr {
+				if v.Get("type").String() == "text" {
+					textParts = append(textParts, v.Get("text").String())
+				} else {
+					allText = false
+					break
+				}
+			}
+
+			if allText && len(textParts) > 0 {
+				joined := strings.Join(textParts, "\n\n")
+				if strings.TrimSpace(joined) != "" {
+					if len(textParts) == 1 {
+						return textParts[0], false
+					}
+					return joined, false
+				}
 			}
 		}
-		return partsJSON, true
-	}
 
-	if !content.Exists() {
-		return "", false
+		return partsJSON, true
 	}
 
 	if content.Type == gjson.String {
 		return content.String(), false
 	}
 
-	if content.IsArray() {
-		var parts []string
-		content.ForEach(func(_, item gjson.Result) bool {
-			switch {
-			case item.Type == gjson.String:
-				parts = append(parts, item.String())
-			case item.IsObject() && item.Get("text").Exists() && item.Get("text").Type == gjson.String:
-				parts = append(parts, item.Get("text").String())
-			default:
-				parts = append(parts, item.Raw)
-			}
-			return true
-		})
-
-		joined := strings.Join(parts, "\n\n")
-		if strings.TrimSpace(joined) != "" {
-			return joined, false
-		}
-		return content.Raw, false
-	}
-
 	if content.IsObject() {
 		if text := content.Get("text"); text.Exists() && text.Type == gjson.String {
 			return text.String(), false
 		}
-		return content.Raw, false
 	}
 
 	return content.Raw, false
