@@ -1144,7 +1144,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	}
 
 	// Inject fake user ID
-	useUserIDCache := true
+	useUserIDCache := false
 	if cacheUserID != nil {
 		useUserIDCache = *cacheUserID
 	}

@@ -208,7 +208,7 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 	}
 }
 
-func TestClaudeExecutor_ReusesUserIDAcrossModels(t *testing.T) {
+func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	resetUserIDCache()
 
 	var userIDs []string
@@ -227,7 +227,18 @@ func TestClaudeExecutor_ReusesUserIDAcrossModels(t *testing.T) {
 
 	t.Logf("End-to-end test: Fake HTTP server started at %s", server.URL)
 
-	executor := NewClaudeExecutor(&config.Config{})
+	cacheEnabled := true
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeKey: []config.ClaudeKey{
+			{
+				APIKey:  "key-123",
+				BaseURL: server.URL,
+				Cloak: &config.CloakConfig{
+					CacheUserID: &cacheEnabled,
+				},
+			},
+		},
+	})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"api_key":  "key-123",
 		"base_url": server.URL,
@@ -265,7 +276,7 @@ func TestClaudeExecutor_ReusesUserIDAcrossModels(t *testing.T) {
 	t.Logf("✓ End-to-end test passed: Same user_id (%s) was used for both models", userIDs[0])
 }
 
-func TestClaudeExecutor_DisablesUserIDCacheWhenConfigured(t *testing.T) {
+func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	resetUserIDCache()
 
 	var userIDs []string
@@ -277,20 +288,7 @@ func TestClaudeExecutor_DisablesUserIDCacheWhenConfigured(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cacheDisabled := false
-	cfg := &config.Config{
-		ClaudeKey: []config.ClaudeKey{
-			{
-				APIKey:  "key-123",
-				BaseURL: server.URL,
-				Cloak: &config.CloakConfig{
-					CacheUserID: &cacheDisabled,
-				},
-			},
-		},
-	}
-
-	executor := NewClaudeExecutor(cfg)
+	executor := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"api_key":  "key-123",
 		"base_url": server.URL,
@@ -316,7 +314,7 @@ func TestClaudeExecutor_DisablesUserIDCacheWhenConfigured(t *testing.T) {
 		t.Fatal("expected user_id to be populated")
 	}
 	if userIDs[0] == userIDs[1] {
-		t.Fatalf("expected user_id to change when cache is disabled, got identical values %q", userIDs[0])
+		t.Fatalf("expected user_id to change when caching is not enabled, got identical values %q", userIDs[0])
 	}
 	if !isValidUserID(userIDs[0]) || !isValidUserID(userIDs[1]) {
 		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
