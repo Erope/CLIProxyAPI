@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +47,34 @@ func (e *refreshOnlyExecutor) HttpRequest(ctx context.Context, auth *coreauth.Au
 	_ = auth
 	_ = req
 	return nil, nil
+}
+
+type failingRefreshExecutor struct {
+	refreshOnlyExecutor
+	err error
+}
+
+func (e *failingRefreshExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	_ = ctx
+	return nil, e.err
+}
+
+type mismatchedRefreshExecutor struct {
+	refreshOnlyExecutor
+	overrideID       string
+	overrideProvider string
+}
+
+func (e *mismatchedRefreshExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	_ = ctx
+	updated := auth.Clone()
+	if e.overrideID != "" {
+		updated.ID = e.overrideID
+	}
+	if e.overrideProvider != "" {
+		updated.Provider = e.overrideProvider
+	}
+	return updated, nil
 }
 
 func TestPostForceRefreshTokens(t *testing.T) {
@@ -111,6 +141,9 @@ func TestPostForceRefreshTokens(t *testing.T) {
 	if updated.Metadata == nil || updated.Metadata["refreshed"] != true {
 		t.Fatalf("expected manager to store refreshed metadata")
 	}
+	if updated.LastRefreshedAt.IsZero() || updated.UpdatedAt.IsZero() {
+		t.Fatalf("expected timestamps to be set")
+	}
 	if exec.count != 1 {
 		t.Fatalf("expected refresh called once, got %d", exec.count)
 	}
@@ -133,4 +166,152 @@ func TestPostForceRefreshTokens_RequiresAuthID(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 when auth_id missing, got %d", w.Code)
 	}
+	results := parseForceRefreshResults(t, w.Body.Bytes())
+	if len(results) != 1 {
+		t.Fatalf("expected single result, got %d", len(results))
+	}
+	if results[0].Error != "auth_id is required" || results[0].Refreshed {
+		t.Fatalf("expected auth_id required error, got refreshed=%v err=%q", results[0].Refreshed, results[0].Error)
+	}
+}
+
+func TestPostForceRefreshTokens_Errors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	makeHandler := func(manager *coreauth.Manager) (*Handler, *gin.Engine) {
+		h := &Handler{authManager: manager}
+		router := gin.New()
+		router.POST("/force", h.PostForceRefreshTokens)
+		return h, router
+	}
+
+	baseAuth := &coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+	}
+
+	tests := []struct {
+		name          string
+		manager       func() *coreauth.Manager
+		body          string
+		expectedCode  int
+		expectedError string
+	}{
+		{
+			name: "auth not found",
+			manager: func() *coreauth.Manager {
+				return coreauth.NewManager(nil, nil, nil)
+			},
+			body:          `{"auth_id":"missing"}`,
+			expectedCode:  http.StatusNotFound,
+			expectedError: "auth not found",
+		},
+		{
+			name: "provider mismatch",
+			manager: func() *coreauth.Manager {
+				m := coreauth.NewManager(nil, nil, nil)
+				m.Register(context.Background(), baseAuth)
+				m.RegisterExecutor(&refreshOnlyExecutor{provider: "codex"})
+				return m
+			},
+			body:          `{"auth_id":"codex-auth","provider":"other"}`,
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "provider mismatch",
+		},
+		{
+			name: "executor missing",
+			manager: func() *coreauth.Manager {
+				m := coreauth.NewManager(nil, nil, nil)
+				m.Register(context.Background(), baseAuth)
+				return m
+			},
+			body:          `{"auth_id":"codex-auth"}`,
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "executor not registered",
+		},
+		{
+			name: "refresh failure",
+			manager: func() *coreauth.Manager {
+				m := coreauth.NewManager(nil, nil, nil)
+				m.Register(context.Background(), baseAuth)
+				m.RegisterExecutor(&failingRefreshExecutor{
+					refreshOnlyExecutor: refreshOnlyExecutor{provider: "codex"},
+					err:                 errors.New("refresh failed"),
+				})
+				return m
+			},
+			body:          `{"auth_id":"codex-auth"}`,
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "refresh failed",
+		},
+		{
+			name: "mismatched id from executor",
+			manager: func() *coreauth.Manager {
+				m := coreauth.NewManager(nil, nil, nil)
+				m.Register(context.Background(), baseAuth)
+				m.RegisterExecutor(&mismatchedRefreshExecutor{
+					refreshOnlyExecutor: refreshOnlyExecutor{provider: "codex"},
+					overrideID:          "other-id",
+				})
+				return m
+			},
+			body:          `{"auth_id":"codex-auth"}`,
+			expectedCode:  http.StatusInternalServerError,
+			expectedError: "executor returned mismatched auth id",
+		},
+		{
+			name: "mismatched provider from executor",
+			manager: func() *coreauth.Manager {
+				m := coreauth.NewManager(nil, nil, nil)
+				m.Register(context.Background(), baseAuth)
+				m.RegisterExecutor(&mismatchedRefreshExecutor{
+					refreshOnlyExecutor: refreshOnlyExecutor{provider: "codex"},
+					overrideProvider:    "other",
+				})
+				return m
+			},
+			body:          `{"auth_id":"codex-auth"}`,
+			expectedCode:  http.StatusInternalServerError,
+			expectedError: "executor returned mismatched provider",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, router := makeHandler(tt.manager())
+			req := httptest.NewRequest(http.MethodPost, "/force", bytes.NewBufferString(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != tt.expectedCode {
+				t.Fatalf("expected status %d, got %d", tt.expectedCode, w.Code)
+			}
+			results := parseForceRefreshResults(t, w.Body.Bytes())
+			if len(results) != 1 {
+				t.Fatalf("expected single result, got %d", len(results))
+			}
+			result := results[0]
+			if tt.expectedError == "" && result.Error != "" {
+				t.Fatalf("expected no error, got %q", result.Error)
+			}
+			if tt.expectedError != "" && !strings.Contains(result.Error, tt.expectedError) {
+				t.Fatalf("expected error containing %q, got %q", tt.expectedError, result.Error)
+			}
+			if result.Refreshed {
+				t.Fatalf("expected refreshed=false for %s", tt.name)
+			}
+		})
+	}
+}
+
+func parseForceRefreshResults(t *testing.T, body []byte) []forceRefreshResult {
+	t.Helper()
+	var resp struct {
+		Results []forceRefreshResult `json:"results"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	return resp.Results
 }
