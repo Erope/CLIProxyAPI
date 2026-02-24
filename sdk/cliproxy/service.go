@@ -339,6 +339,13 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval)
 }
 
+func (s *Service) applyRefreshRateConfig(cfg *config.Config) {
+	if s == nil || s.coreManager == nil || cfg == nil {
+		return
+	}
+	s.coreManager.SetRefreshRateLimit(cfg.RefreshRPM)
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false
@@ -477,6 +484,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	s.applyRefreshRateConfig(s.cfg)
 
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
@@ -593,6 +601,7 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 
 		s.applyRetryConfig(newCfg)
+		s.applyRefreshRateConfig(newCfg)
 		s.applyPprofConfig(newCfg)
 		if s.server != nil {
 			s.server.UpdateClients(newCfg)

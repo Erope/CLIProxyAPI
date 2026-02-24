@@ -156,6 +156,11 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
+
+	refreshLimiterMu     sync.RWMutex
+	refreshLimiter       *time.Ticker
+	refreshLimiterCtx    context.Context
+	refreshLimiterCancel context.CancelFunc
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -217,6 +222,50 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+}
+
+// SetRefreshRateLimit caps background refresh starts to the specified RPM.
+// Values <= 0 disable throttling.
+func (m *Manager) SetRefreshRateLimit(rpm int) {
+	if m == nil {
+		return
+	}
+	m.refreshLimiterMu.Lock()
+	if m.refreshLimiterCancel != nil {
+		m.refreshLimiterCancel()
+		m.refreshLimiterCancel = nil
+	}
+	if m.refreshLimiter != nil {
+		m.refreshLimiter.Stop()
+		m.refreshLimiter = nil
+	}
+	m.refreshLimiterCtx = nil
+
+	if rpm > 0 {
+		interval := time.Minute / time.Duration(rpm)
+		if interval <= 0 {
+			interval = time.Millisecond
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		m.refreshLimiterCtx = ctx
+		m.refreshLimiterCancel = cancel
+		m.refreshLimiter = time.NewTicker(interval)
+	}
+	m.refreshLimiterMu.Unlock()
+}
+
+func (m *Manager) stopRefreshLimiter() {
+	m.refreshLimiterMu.Lock()
+	if m.refreshLimiterCancel != nil {
+		m.refreshLimiterCancel()
+		m.refreshLimiterCancel = nil
+	}
+	if m.refreshLimiter != nil {
+		m.refreshLimiter.Stop()
+		m.refreshLimiter = nil
+	}
+	m.refreshLimiterCtx = nil
+	m.refreshLimiterMu.Unlock()
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -1860,6 +1909,7 @@ func (m *Manager) StopAutoRefresh() {
 		m.refreshCancel()
 		m.refreshCancel = nil
 	}
+	m.stopRefreshLimiter()
 }
 
 func (m *Manager) checkRefreshes(ctx context.Context) {
@@ -1880,7 +1930,44 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 			if !m.markRefreshPending(a.ID, now) {
 				continue
 			}
-			go m.refreshAuth(ctx, a.ID)
+			go m.refreshAuthThrottled(ctx, a.ID)
+		}
+	}
+}
+
+func (m *Manager) refreshAuthThrottled(ctx context.Context, id string) {
+	if !m.awaitRefreshPermit(ctx) {
+		return
+	}
+	m.refreshAuth(ctx, id)
+}
+
+func (m *Manager) awaitRefreshPermit(ctx context.Context) bool {
+	for {
+		m.refreshLimiterMu.RLock()
+		limiter := m.refreshLimiter
+		limiterCtx := m.refreshLimiterCtx
+		m.refreshLimiterMu.RUnlock()
+
+		if limiter == nil {
+			return true
+		}
+
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
+		if limiterCtx == nil {
+			return true
+		}
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-limiterCtx.Done():
+			continue
+		case <-limiter.C:
+			return true
 		}
 	}
 }

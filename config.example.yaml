@@ -78,6 +78,9 @@ request-retry: 3
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# Maximum number of background refresh attempts per minute. Set to 0 to disable throttling.
+refresh-rpm: 0
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
